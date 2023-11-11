@@ -94,8 +94,8 @@ class SAGCN(nn.Module):
 
         self.supports = supports
 
-        self.start_conv = nn.Conv1d(in_features, hidden_dim, kernel_size=(1, 1))
-
+        # self.start_conv = nn.Conv1d(in_features, hidden_dim, kernel_size=(1, 1))
+        self.start_conv = nn.Conv1d(in_features, hidden_dim, kernel_size=1)
         self.bn_start = nn.BatchNorm2d(hidden_dim)
 
         receptive_field = 1
@@ -148,15 +148,28 @@ class SAGCN(nn.Module):
                 receptive_field -= a_s_records[i]
 
     def forward(self, X):
-        X = X.permute(0, 3, 1, 2)  # [batch, feature, stocks, length]
-        in_len = X.shape[3]
+        # print('X ', X)
+        # from asu inputs: [batch, num_stock, window_len, num_features]
+        print('X shape', X.shape)
+        # X = X.permute(0, 1, 3, 2)  # [batch, feature, stocks, length]
+        X = X.permute(0, 2, 1)
+        # in_len = X.shape[3]
+        in_len = 9
+        # in_len = len(X)
         if in_len < self.receptive_field:
             x = nn.functional.pad(X, (self.receptive_field - in_len, 0, 0, 0))
         else:
             x = X
         assert not torch.isnan(x).any()
 
-        x = self.bn_start(self.start_conv(x))
+        # for x_batch in x:
+        # xx = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3])
+        # for x_batch in x:
+        # x_conv = self.start_conv(x_batch)
+        x_conv = self.start_conv(x)
+        x_bn = self.bn_start(x_conv)
+        # x_new = self.bn_start()
+
         new_supports = None
         if self.gcn_bool and self.addaptiveadj and self.supports is not None:
             adp_matrix = torch.softmax(torch.relu(torch.mm(self.nodevec, self.nodevec.t())), dim=0)
@@ -184,7 +197,7 @@ class SAGCN(nn.Module):
 
 
 class LiteTCN(nn.Module):
-    def __init__(self, in_features, hidden_size, num_layers, kernel_size=2, dropout=0.4):
+    def __init__(self, in_features, hidden_size, num_layers, output_size, kernel_size=2, dropout=0.4):
         super(LiteTCN, self).__init__()
         self.num_layers = num_layers
         self.tcns = nn.ModuleList()
@@ -192,7 +205,7 @@ class LiteTCN(nn.Module):
         self.dropouts = nn.ModuleList()
 
         self.start_conv = nn.Conv1d(in_features, hidden_size, kernel_size=1)
-        self.end_conv = nn.Conv1d(hidden_size, 1, kernel_size=1)
+        self.end_conv = nn.Conv1d(hidden_size, output_size, kernel_size=1)
 
         receptive_field = 1
         additional_scope = kernel_size - 1
@@ -217,32 +230,49 @@ class LiteTCN(nn.Module):
         self.receptive_field = receptive_field
 
     def forward(self, X):
+        # original shape of X, window_length, stock, features
+        # print('shape of X before permute ', X.shape)
         X = X.permute(0, 2, 1)
-        in_len = X.shape[2]
+        # after permute
+        # print('shape of x after permute ', X.shape)
+        # print('after permute, data is window_length , features, stock')
+
+        in_len = X.shape[0]
+        # print('in_len ', in_len)
         if in_len < self.receptive_field:
             x = nn.functional.pad(X, (self.receptive_field - in_len, 0))
         else:
             x = X
 
+        # print('before start_conv X is ', x.shape)
         x = self.start_conv(x)
+        # print('after start_conv X is ', x.shape)
 
         for i in range(self.num_layers):
             residual = x
+            # print('residual shape ', residual.shape)
             assert not torch.isnan(x).any()
             x = self.tcns[i](x)
+            # print('after tcn x is ', x.shape)
             assert not torch.isnan(x).any()
             x = x + residual[:, :, -x.shape[-1]:]
+            # print('after summing residual and x, x is ', x.shape)
 
             x = self.bns[i](x)
+            # print('after bns, shape of x is ', x.shape)
         assert not torch.isnan(x).any()
-        x = self.end_conv(x)
 
-        return torch.sigmoid(x.squeeze())
+        # print('before end_conv x is ', x.shape)
+        x = self.end_conv(x)
+        # print('after end_conv x is ', x.shape)
+
+        x_squeezed = torch.sigmoid(x.squeeze())
+        return x_squeezed
 
 
 class ASU(nn.Module):
     def __init__(self, num_nodes, in_features, hidden_dim, window_len,
-                 dropout=0.3, kernel_size=2, layers=4, supports=None,
+                 dropout=0.3, kernel_size=2, layers=2, supports=None,
                  spatial_bool=True, addaptiveadj=True, aptinit=None):
         super(ASU, self).__init__()
         self.sagcn = SAGCN(num_nodes, in_features, hidden_dim, window_len, dropout, kernel_size, layers,
@@ -261,8 +291,10 @@ class ASU(nn.Module):
         mask: [batch, num_stock]
         outputs: [batch, scores]
         """
-
-        x = self.bn1(self.sagcn(inputs))
+        # Orig input: num_records (time_ids), window_length (batch), stocks, features
+        # inputs = inputs.permute(0, 2, 1, 3)
+        x_sagcn = self.sagcn(inputs)
+        x = self.bn1(x_sagcn)
         x = self.linear1(x).squeeze(-1)
         score = 1 / ((-x).exp() + 1)
         score[mask] = -math.inf
